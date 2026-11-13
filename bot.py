@@ -1,137 +1,659 @@
+
 import os
-
-# تحديث أداة التحميل لأحدث إصدار تلقائياً لتجاوز حماية المنصات
-os.system('pip install --upgrade yt-dlp')
-
-from flask import Flask
+import time
+import shutil
+import logging
+import tempfile
 import threading
+from pathlib import Path
+from urllib.parse import urlparse
+
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp
+from flask import Flask
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- بداية السيرفر الوهمي (لحل مشكلة Render) ---
-app = Flask('')
 
-@app.route('/')
+# ==============================
+# Configuration
+# ==============================
+
+TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", "8080"))
+
+# Safe margin below the usual 50 MB Bot API upload limit
+UPLOAD_LIMIT = 49 * 1024 * 1024
+
+# Warn users when the estimated download is above this size
+LARGE_FILE_LIMIT = 100 * 1024 * 1024
+
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable is missing")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("sinal")
+
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
+
+# Per-user state
+sessions = {}
+sessions_lock = threading.Lock()
+
+# Limit simultaneous downloads to protect server resources
+download_slots = threading.BoundedSemaphore(2)
+
+
+# ==============================
+# Health endpoint
+# ==============================
+
+@app.route("/")
 def home():
-    return "I am alive!"
+    return "Sinal bot is running", 200
 
-def run():
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
-def keep_alive():
-    t = threading.Thread(target=run)
-    t.start()
-# ---------------------------------------------
-
-BOT_TOKEN = "9239041330:AAEk8woAvKhdslKCpPZUs9V4n2vs8Br3jB4"
-bot = telebot.TeleBot(BOT_TOKEN)
-
-user_links = {}
-
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "أهلاً بك معك سِنآل! 👋\nأرسل لي أي رابط (تيك توك، يوتيوب، إنستغرام، X) وسأقوم بتحميله ومعالجته لك.")
-
-@bot.message_handler(func=lambda message: message.text and message.text.startswith("http"))
-def handle_url(message):
-    chat_id = message.chat.id
-    user_links[chat_id] = message.text.strip()
-    
-    markup = InlineKeyboardMarkup()
-    markup.row_width = 2
-    markup.add(
-        InlineKeyboardButton("🎬 تحميل الفيديو", callback_data="vid_best"),
-        InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data="audio")
+def run_server():
+    app.run(
+        host="0.0.0.0",
+        port=PORT,
+        use_reloader=False
     )
-    
-    bot.reply_to(message, "اختر صيغة التحميل المطلوبة:", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
-    chat_id = call.message.chat.id
-    url = user_links.get(chat_id)
-    
-    if not url:
-        bot.answer_callback_query(call.id, "انتهت صلاحية الرابط، أرسله مجدداً.")
-        return
 
-    bot.edit_message_text("⏳ جاري التحميل والمعالجة وتجاوز الحماية... يرجى الانتظار.", chat_id, call.message.message_id)
-    
-    file_prefix = f"download_{chat_id}"
-    
-    # إعدادات متقدمة لتجاوز الحماية وجلب أفضل صيغة MP4 متوافقة
-    ydl_opts = {
-        'outtmpl': f'{file_prefix}.%(ext)s',
-        'quiet': True,
-        'no_warnings': True,
-        'format': 'best[ext=mp4]/best',
-        'nocheckcertificate': True,
-        'geo_bypass': True,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
+# ==============================
+# URL validation
+# ==============================
+
+def valid_url(url):
+    try:
+        parsed = urlparse(url)
+        return (
+            parsed.scheme in ("https", "http")
+            and bool(parsed.hostname)
+            and not parsed.username
+            and not parsed.password
+        )
+    except (ValueError, AttributeError):
+        return False
+
+
+# ==============================
+# yt-dlp helpers
+# ==============================
+
+def get_info(url):
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+        "socket_timeout": 25,
+        "retries": 2,
     }
 
-    if call.data == "audio":
-        ydl_opts['format'] = 'bestaudio/best'
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
+    with yt_dlp.YoutubeDL(options) as ydl:
+        return ydl.extract_info(url, download=False)
+
+
+def estimated_size(info, quality):
+    """
+    Return a best-effort size estimate in bytes.
+    Exact size is not always available before downloading.
+    """
+    formats = info.get("formats") or []
+
+    if quality == "audio":
+        candidates = [
+            f for f in formats
+            if f.get("vcodec") == "none"
+            and f.get("acodec") != "none"
+        ]
+    else:
+        max_height = {
+            "1080": 1080,
+            "720": 720,
+            "480": 480,
+        }.get(quality)
+
+        candidates = [
+            f for f in formats
+            if f.get("vcodec") != "none"
+            and (
+                max_height is None
+                or not f.get("height")
+                or f.get("height") <= max_height
+            )
+        ]
+
+    if not candidates:
+        return info.get("filesize") or info.get("filesize_approx")
+
+    # Pick the highest-quality candidate within the selected limit.
+    candidates.sort(
+        key=lambda f: (
+            f.get("height") or 0,
+            f.get("tbr") or 0
+        )
+    )
+    chosen = candidates[-1]
+
+    size = chosen.get("filesize") or chosen.get("filesize_approx")
+
+    # Some sites provide separate audio/video formats.
+    if quality != "audio" and chosen.get("acodec") == "none":
+        audio_formats = [
+            f for f in formats
+            if f.get("vcodec") == "none"
+            and f.get("acodec") != "none"
+        ]
+
+        if audio_formats:
+            audio_formats.sort(
+                key=lambda f: f.get("tbr") or 0
+            )
+            audio = audio_formats[-1]
+            audio_size = (
+                audio.get("filesize")
+                or audio.get("filesize_approx")
+            )
+
+            if size and audio_size:
+                return size + audio_size
+
+    return size
+
+
+def format_size(size):
+    if size is None:
+        return "غير معروف"
+
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(size)
+
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}"
+        value /= 1024
+
+
+def make_options(folder, quality):
+    if quality == "audio":
+        fmt = "bestaudio/best"
+
+    elif quality == "1080":
+        fmt = (
+            "bestvideo[height<=1080]+bestaudio/"
+            "best[height<=1080]"
+        )
+
+    elif quality == "720":
+        fmt = (
+            "bestvideo[height<=720]+bestaudio/"
+            "best[height<=720]"
+        )
+
+    elif quality == "480":
+        fmt = (
+            "bestvideo[height<=480]+bestaudio/"
+            "best[height<=480]"
+        )
+
+    else:
+        # Best available video and audio, without re-encoding.
+        fmt = "bestvideo*+bestaudio/best"
+
+    options = {
+        "format": fmt,
+        "outtmpl": str(Path(folder) / "%(title).100s-%(id)s.%(ext)s"),
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 5,
+        "fragment_retries": 5,
+        "continuedl": True,
+        "socket_timeout": 30,
+    }
+
+    if quality != "audio":
+        options["merge_output_format"] = "mp4"
+
+    else:
+        options["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
         }]
 
+    return options
+
+
+def find_output(folder, audio=False):
+    ignored = {
+        ".part", ".ytdl", ".json", ".jpg", ".jpeg",
+        ".png", ".webp", ".vtt", ".srt", ".description"
+    }
+
+    files = [
+        p for p in Path(folder).iterdir()
+        if p.is_file() and p.suffix.lower() not in ignored
+    ]
+
+    if audio:
+        files = [
+            p for p in files
+            if p.suffix.lower() == ".mp3"
+        ]
+
+    if not files:
+        raise RuntimeError("Downloaded file was not found")
+
+    return max(files, key=lambda p: p.stat().st_size)
+
+
+# ==============================
+# Quality selection
+# ==============================
+
+def quality_keyboard(key, info, large=False):
+    markup = InlineKeyboardMarkup(row_width=2)
+
+    qualities = [
+        ("original", "🌟 أفضل جودة"),
+        ("1080", "🎬 1080p"),
+        ("720", "📱 720p"),
+        ("audio", "🎵 MP3"),
+    ]
+
+    available_heights = {
+        f.get("height")
+        for f in (info.get("formats") or [])
+        if f.get("height")
+    }
+
+    # Only show 1080p if the source has it.
+    if 1080 not in available_heights:
+        qualities = [
+            item for item in qualities
+            if item[0] != "1080"
+        ]
+
+    if not any(h <= 720 for h in available_heights):
+        qualities = [
+            item for item in qualities
+            if item[0] != "720"
+        ]
+
+    buttons = [
+        InlineKeyboardButton(
+            label,
+            callback_data=f"get:{key}:{quality}"
+        )
+        for quality, label in qualities
+    ]
+
+    markup.add(*buttons)
+    markup.add(
+        InlineKeyboardButton(
+            "❌ إلغاء",
+            callback_data=f"cancel:{key}"
+        )
+    )
+    return markup
+
+
+# ==============================
+# Commands
+# ==============================
+
+@bot.message_handler(commands=["start"])
+def start(message):
+    bot.reply_to(
+        message,
+        "أهلًا بك في سِنآل 👋\n\n"
+        "أرسل رابط فيديو عام من منصة مدعومة، "
+        "وسأفحص الجودات المتاحة قبل التنزيل."
+    )
+
+
+@bot.message_handler(
+    func=lambda m: bool(
+        m.text and m.text.strip().startswith(("https://", "http://"))
+    )
+)
+def receive_url(message):
+    url = message.text.strip()
+
+    if not valid_url(url):
+        bot.reply_to(message, "❌ الرابط غير صالح.")
+        return
+
+    key = f"{message.chat.id}_{message.from_user.id}"
+
+    status = bot.reply_to(
+        message,
+        "🔎 أفحص الرابط والجودات والحجم المتاح..."
+    )
+
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            if call.data == "audio":
-                filename = os.path.splitext(filename)[0] + ".mp3"
+        info = get_info(url)
 
-        if not os.path.exists(filename):
-            raise Exception("فشل حفظ الملف على الخادم.")
+        title = info.get("title") or "بدون عنوان"
+        duration = info.get("duration")
+        duration_text = (
+            f"{int(duration // 60)} دقيقة"
+            if duration is not None else "غير معروف"
+        )
 
-        file_size_mb = os.path.getsize(filename) / (1024 * 1024)
-        
-        # إذا كان الفيديو أكبر من 50MB، نقوم بضغط باستخدام ffmpeg تلقائياً ليتوافق مع تيليجرام
-        if file_size_mb > 50 and call.data != "audio":
-            bot.edit_message_text("🔄 حجم الفيديو كبير، جاري ضغطه وتقليص مساحته ليناسب تيليجرام...", chat_id, call.message.message_id)
-            compressed_filename = f"compressed_{file_prefix}.mp4"
-            # استخدام ffmpeg لتقليل معدل البت وضغط الفيديو
-            os.system(f"ffmpeg -i '{filename}' -vcodec libx264 -crf 28 -preset fast '{compressed_filename}' -y")
-            
-            if os.path.exists(compressed_filename):
-                os.remove(filename)
-                filename = compressed_filename
-                file_size_mb = os.path.getsize(filename) / (1024 * 1024)
+        with sessions_lock:
+            sessions[key] = {
+                "url": url,
+                "info": info,
+                "status_id": status.message_id,
+                "chat_id": message.chat.id,
+                "user_id": message.from_user.id,
+                "created": time.time(),
+                "busy": False,
+            }
 
-        if file_size_mb > 50:
-            bot.edit_message_text(f"❌ عذراً، حجم الفيديو ({file_size_mb:.1f}MB) كبير جداً ولم نتمكن من ضغطه بما يكفي.", chat_id, call.message.message_id)
-            os.remove(filename)
+        markup = quality_keyboard(key, info)
+
+        bot.edit_message_text(
+            f"📹 {title[:250]}\n"
+            f"⏱ المدة: {duration_text}\n\n"
+            "اختر الجودة المطلوبة.\n"
+            "الحجم المعروض قد يكون تقديريًا، "
+            "وقد تختلف خيارات الجودة حسب المنصة.",
+            message.chat.id,
+            status.message_id,
+            reply_markup=markup
+        )
+
+    except Exception:
+        logger.exception("Failed to inspect URL")
+
+        bot.edit_message_text(
+            "❌ تعذر فحص الرابط.\n"
+            "تأكد أنه عام ومدعوم، وحدّث yt-dlp "
+            "إذا استمرت المشكلة.",
+            message.chat.id,
+            status.message_id
+        )
+
+
+# ==============================
+# Download callbacks
+# ==============================
+
+@bot.callback_query_handler(
+    func=lambda c: c.data.startswith(("get:", "cancel:"))
+)
+def callback(call):
+    parts = call.data.split(":")
+
+    if parts[0] == "cancel":
+        key = parts[1]
+
+        with sessions_lock:
+            session = sessions.get(key)
+
+            if session and session["user_id"] == call.from_user.id:
+                sessions.pop(key, None)
+
+        bot.answer_callback_query(call.id, "تم الإلغاء.")
+        try:
+            bot.edit_message_text(
+                "تم إلغاء العملية.",
+                call.message.chat.id,
+                call.message.message_id
+            )
+        except Exception:
+            pass
+        return
+
+    _, key, quality = parts
+
+    if quality not in ("original", "1080", "720", "480", "audio"):
+        bot.answer_callback_query(call.id, "خيار غير صالح.")
+        return
+
+    with sessions_lock:
+        session = sessions.get(key)
+
+        if not session or session["user_id"] != call.from_user.id:
+            bot.answer_callback_query(
+                call.id,
+                "انتهت صلاحية الرابط. أرسله مجددًا."
+            )
             return
 
-        bot.edit_message_text("📤 جاري إرسال الملف إليك...", chat_id, call.message.message_id)
+        if session["busy"]:
+            bot.answer_callback_query(
+                call.id,
+                "هناك عملية تنزيل جارية بالفعل."
+            )
+            return
 
-        with open(filename, 'rb') as file:
-            if call.data == "audio":
-                bot.send_audio(chat_id, file)
-            else:
-                bot.send_video(chat_id, file)
+        info = session["info"]
+        size = estimated_size(info, quality)
 
-        os.remove(filename)
-        bot.delete_message(chat_id, call.message.message_id)
+        if (
+            size is not None
+            and size > LARGE_FILE_LIMIT
+            and not session.get("large_confirmed")
+        ):
+            session["pending_quality"] = quality
 
-    except Exception as e:
-        bot.edit_message_text(f"❌ حدث خطأ أثناء التحميل أو التجاوز.\nالتفاصيل: {str(e)[:100]}", chat_id, call.message.message_id)
-        for f in os.listdir():
-            if f.startswith(file_prefix) or f.startswith(f"compressed_{file_prefix}"):
-                try:
-                    os.remove(f)
-                except:
-                    pass
+            markup = InlineKeyboardMarkup()
+            markup.row(
+                InlineKeyboardButton(
+                    "⏳ متابعة التنزيل",
+                    callback_data=f"confirm:{key}"
+                ),
+                InlineKeyboardButton(
+                    "↩️ اختيار جودة أخرى",
+                    callback_data=f"back:{key}"
+                )
+            )
 
-# --- تشغيل السيرفر الوهمي والبوت معاً ---
+            bot.answer_callback_query(call.id)
+
+            bot.edit_message_text(
+                "⚠️ الملف كبير الحجم\n\n"
+                f"الحجم المتوقع: {format_size(size)}\n"
+                "قد يستغرق التنزيل وقتًا أطول، "
+                "ويحتاج إلى مساحة تخزين كافية.\n\n"
+                "تنبيه: إذا تجاوز الملف حد رفع تيليجرام، "
+                "فلن يمكن إرساله عبر واجهة البوت المعتادة.",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=markup
+            )
+            return
+
+        session["busy"] = True
+        session["large_confirmed"] = False
+
+    bot.answer_callback_query(call.id)
+
+    threading.Thread(
+        target=download_and_send,
+        args=(key, quality),
+        daemon=True
+    ).start()
+
+
+@bot.callback_query_handler(
+    func=lambda c: c.data.startswith(("confirm:", "back:"))
+)
+def confirm_callback(call):
+    action, key = call.data.split(":", 1)
+
+    with sessions_lock:
+        session = sessions.get(key)
+
+        if not session or session["user_id"] != call.from_user.id:
+            bot.answer_callback_query(call.id, "انتهت صلاحية العملية.")
+            return
+
+        if action == "back":
+            session["large_confirmed"] = False
+            info = session["info"]
+            markup = quality_keyboard(key, info)
+            bot.answer_callback_query(call.id)
+
+            bot.edit_message_text(
+                "اختر جودة أخرى:",
+                call.message.chat.id,
+                call.message.message_id,
+                reply_markup=markup
+            )
+            return
+
+        if session["busy"]:
+            bot.answer_callback_query(call.id, "العملية قيد التنفيذ.")
+            return
+
+        quality = session.get("pending_quality", "original")
+        session["large_confirmed"] = True
+        session["busy"] = True
+
+    bot.answer_callback_query(call.id, "بدأ التنزيل.")
+
+    threading.Thread(
+        target=download_and_send,
+        args=(key, quality),
+        daemon=True
+    ).start()
+
+
+# ==============================
+# Download worker
+# ==============================
+
+def download_and_send(key, quality):
+    with sessions_lock:
+        session = sessions.get(key)
+
+    if not session:
+        return
+
+    chat_id = session["chat_id"]
+    status_id = session["status_id"]
+    url = session["url"]
+
+    if not download_slots.acquire(blocking=False):
+        with sessions_lock:
+            if key in sessions:
+                sessions[key]["busy"] = False
+
+        bot.send_message(
+            chat_id,
+            "الخادم مشغول حاليًا. حاول مرة أخرى بعد قليل."
+        )
+        return
+
+    try:
+        bot.edit_message_text(
+            "⏳ جارٍ التنزيل بأعلى جودة متاحة ضمن اختيارك...",
+            chat_id,
+            status_id
+        )
+
+        with tempfile.TemporaryDirectory(prefix="sinal_") as folder:
+            with yt_dlp.YoutubeDL(
+                make_options(folder, quality)
+            ) as ydl:
+                ydl.download([url])
+
+            output = find_output(folder, quality == "audio")
+            size = output.stat().st_size
+
+            if size > UPLOAD_LIMIT:
+                bot.edit_message_text(
+                    f"✅ اكتمل التنزيل: {format_size(size)}\n\n"
+                    "لكن الملف أكبر من حد الإرسال المتاح "
+                    "في إعداد البوت الحالي.\n"
+                    "لم أضغطه تلقائيًا حتى لا أخفض الجودة.\n\n"
+                    "يمكنك اختيار جودة أقل، أو إعداد "
+                    "خادم Telegram Bot API محلي أو تخزين خارجي "
+                    "لدعم الملفات الكبيرة.",
+                    chat_id,
+                    status_id
+                )
+                return
+
+            bot.edit_message_text(
+                f"📤 جارٍ إرسال الملف ({format_size(size)})...",
+                chat_id,
+                status_id
+            )
+
+            with output.open("rb") as file:
+                if quality == "audio":
+                    bot.send_audio(
+                        chat_id,
+                        file,
+                        timeout=180,
+                        title=output.stem[:64]
+                    )
+                elif output.suffix.lower() == ".mp4":
+                    bot.send_video(
+                        chat_id,
+                        file,
+                        timeout=180,
+                        supports_streaming=True
+                    )
+                else:
+                    bot.send_document(
+                        chat_id,
+                        file,
+                        timeout=180
+                    )
+
+        try:
+            bot.delete_message(chat_id, status_id)
+        except Exception:
+            pass
+
+    except Exception:
+        logger.exception("Download or upload failed")
+
+        try:
+            bot.edit_message_text(
+                "❌ فشل التنزيل أو الإرسال.\n"
+                "قد تكون المشكلة في الرابط أو FFmpeg "
+                "أو قيود المنصة أو حدود تيليجرام. "
+                "راجع سجلات Render لمعرفة التفاصيل.",
+                chat_id,
+                status_id
+            )
+        except Exception:
+            bot.send_message(chat_id, "❌ تعذر إكمال العملية.")
+
+    finally:
+        download_slots.release()
+
+        with sessions_lock:
+            if key in sessions:
+                sessions[key]["busy"] = False
+                sessions[key]["large_confirmed"] = False
+
+
+# ==============================
+# Startup
+# ==============================
+
 if __name__ == "__main__":
-    keep_alive()
-    print("البوت يعمل الآن...")
-    bot.infinity_polling()
+    threading.Thread(
+        target=run_server,
+        daemon=True
+    ).start()
+
+    logger.info("Sinal is running")
+
+    bot.infinity_polling(
+        skip_pending=True,
+        timeout=30,
+        long_polling_timeout=30
+    )
