@@ -1,7 +1,8 @@
 import os
-os.system('pip install --upgrade yt-dlp')  # لتحديث الأداة تلقائياً وحل مشكلة الروابط
 
-import os
+# تحديث أداة التحميل لأحدث إصدار تلقائياً
+os.system('pip install --upgrade yt-dlp')
+
 from flask import Flask
 import threading
 import telebot
@@ -23,14 +24,15 @@ def keep_alive():
     t.start()
 # ---------------------------------------------
 
-BOT_TOKEN = "9239041330:AAEk8woAvKhdslKCpPZUs9V4n2vs8Br3jB4"  # ضع توكن بوتك الحقيقي هنا
+# ضع توكن بوتك الصحيح هنا حصراً
+BOT_TOKEN = "9239041330:AAEk8woAvKhdslKCpPZUs9V4n2vs8Br3jB4"
 bot = telebot.TeleBot(BOT_TOKEN)
 
 user_links = {}
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "أهلاً بك معك سِنآل! 👋\nأرسل لي رابط الفيديو (تيك توك، يوتيوب، إنستغرام، X) وسأقوم بتحميله لك بدون علامة مائية.")
+    bot.reply_to(message, "أهلاً بك معك سِنآل! 👋\nأرسل لي رابط الفيديو (تيك توك، يوتيوب، إنستغرام، X) وسأقوم بتحميله لك.")
 
 @bot.message_handler(func=lambda message: message.text and message.text.startswith("http"))
 def handle_url(message):
@@ -40,12 +42,11 @@ def handle_url(message):
     markup = InlineKeyboardMarkup()
     markup.row_width = 2
     markup.add(
-        InlineKeyboardButton("🎬 فيديو 1080p", callback_data="vid_1080"),
-        InlineKeyboardButton("🎬 فيديو 720p", callback_data="vid_720"),
+        InlineKeyboardButton("🎬 فيديو بجودة عالية", callback_data="vid_best"),
         InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data="audio")
     )
     
-    bot.reply_to(message, "اختر صيغة ودقة التحميل المطلوبة:", reply_markup=markup)
+    bot.reply_to(message, "اختر صيغة التحميل المطلوبة:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_query(call):
@@ -63,12 +64,11 @@ def callback_query(call):
         'outtmpl': f'{file_prefix}.%(ext)s',
         'quiet': True,
         'no_warnings': True,
+        'socket_timeout': 30,
     }
 
-    if call.data == "vid_1080":
-        ydl_opts['format'] = 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best'
-    elif call.data == "vid_720":
-        ydl_opts['format'] = 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best'
+    if call.data == "vid_best":
+        ydl_opts['format'] = 'best/bestvideo+bestaudio'
     elif call.data == "audio":
         ydl_opts['format'] = 'bestaudio/best'
         ydl_opts['postprocessors'] = [{
@@ -96,10 +96,13 @@ def callback_query(call):
         bot.delete_message(chat_id, call.message.message_id)
 
     except Exception as e:
-        bot.edit_message_text(f"❌ حدث خطأ أثناء التحميل. تأكد أن الرابط عام وليس خاصاً.\nالتفاصيل: {str(e)[:100]}", chat_id, call.message.message_id)
+        bot.edit_message_text(f"❌ حدث خطأ أثناء التحميل.\nالتفاصيل: {str(e)[:100]}", chat_id, call.message.message_id)
         for f in os.listdir():
             if f.startswith(file_prefix):
-                os.remove(f)
+                try:
+                    os.remove(f)
+                except:
+                    pass
 
 # --- تشغيل السيرفر الوهمي والبوت معاً ---
 if __name__ == "__main__":
