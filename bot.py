@@ -1,4 +1,7 @@
 import os
+os.system('pip install --upgrade yt-dlp')  # لتحديث الأداة تلقائياً وحل مشكلة الروابط
+
+import os
 from flask import Flask
 import threading
 import telebot
@@ -20,7 +23,7 @@ def keep_alive():
     t.start()
 # ---------------------------------------------
 
-BOT_TOKEN = "9239041330:AAEk8woAvKhdslKCpPZUs9V4n2vs8Br3jB4"
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # ضع توكن بوتك الحقيقي هنا
 bot = telebot.TeleBot(BOT_TOKEN)
 
 user_links = {}
