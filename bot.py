@@ -41,7 +41,7 @@ def handle_url(message):
     markup = InlineKeyboardMarkup()
     markup.row_width = 2
     markup.add(
-        InlineKeyboardButton("🎬 تحميل الفيديو (مناسب لتيليجرام)", callback_data="vid_best"),
+        InlineKeyboardButton("🎬 تحميل الفيديو", callback_data="vid_best"),
         InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data="audio")
     )
     
@@ -56,15 +56,16 @@ def callback_query(call):
         bot.answer_callback_query(call.id, "انتهت صلاحية الرابط، أرسله مجدداً.")
         return
 
-    bot.edit_message_text("⏳ جاري التحميل والمعالجة... يرجى الانتظار .. سِنآل يرحب بك.", chat_id, call.message.message_id)
+    bot.edit_message_text("⏳ جاري التحميل والمعالجة... يرجى الانتظار.", chat_id, call.message.message_id)
     
     file_prefix = f"download_{chat_id}"
+    
+    # التعديل هنا لاختيار أصغر وأفضل صيغة متوافقة تماماً مع تيليجرام
     ydl_opts = {
         'outtmpl': f'{file_prefix}.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        # تقييد الدقة والحجم لضمان عدم تجاوز حدود تيليجرام (أقل من 45MB)
-        'format': 'best[height<=720][filesize<45M]/best[height<=480]/best[ext=mp4]/best',
+        'format': 'worst[ext=mp4]/best[ext=mp4]/best',
     }
 
     if call.data == "audio":
@@ -87,7 +88,7 @@ def callback_query(call):
 
         file_size_mb = os.path.getsize(filename) / (1024 * 1024)
         if file_size_mb > 50:
-            bot.edit_message_text(f"❌ حجم الفيديو ({file_size_mb:.1f}MB) أكبر من الحد المسموح به في تيليجرام (50MB).", chat_id, call.message.message_id)
+            bot.edit_message_text(f"❌ عذراً، حجم الفيديو ({file_size_mb:.1f}MB) كبير جداً ويتجاوز حد تيليجرام.", chat_id, call.message.message_id)
             os.remove(filename)
             return
 
