@@ -86,6 +86,7 @@ def valid_url(url):
 # yt-dlp helpers
 # ==============================
 
+
 def get_info(url):
     options = {
         "quiet": True,
@@ -94,6 +95,11 @@ def get_info(url):
         "skip_download": True,
         "socket_timeout": 25,
         "retries": 2,
+        "extractor_args": {
+            "tiktok": {
+                "app_info": ["0"]
+            }
+        },
     }
 
     with yt_dlp.YoutubeDL(options) as ydl:
