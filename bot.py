@@ -32,7 +32,7 @@ if not TOKEN:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sinal")
-
+logger.info("yt-dlp version: %s", yt_dlp.version.__version__)
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
