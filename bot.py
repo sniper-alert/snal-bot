@@ -20,7 +20,7 @@ def keep_alive():
     t.start()
 # ---------------------------------------------
 
-BOT_TOKEN = "9239041330:AAEk8woAvKhdslKCpPZUs9V4n2vs8Br3jB4"  # ضع توكن بوتك الحقيقي هنا
+BOT_TOKEN = "9239041330:AAEk8woAvKhdslKCpPZUs9V4n2vs8Br3jB4"
 bot = telebot.TeleBot(BOT_TOKEN)
 
 user_links = {}
