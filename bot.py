@@ -8,10 +8,13 @@ import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
+
 import telebot
 import yt_dlp
+print("YT-DLP VERSION:", yt_dlp.version.__version__)
 from flask import Flask
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 
 
 # ==============================
