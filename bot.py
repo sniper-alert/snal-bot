@@ -1,16 +1,33 @@
 import os
+from flask import Flask
+import threading
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp
 
-BOT_TOKEN = "9239041330:AAEk8woAvKhdslKCpPZUs9V4n2vs8Br3jB4"  # ضع توكن بوتك هنا بين العلامتين
+# --- بداية السيرفر الوهمي (لحل مشكلة Render) ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "I am alive!"
+
+def run():
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+def keep_alive():
+    t = threading.Thread(target=run)
+    t.start()
+# ---------------------------------------------
+
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # ضع توكن بوتك الحقيقي هنا
 bot = telebot.TeleBot(BOT_TOKEN)
 
 user_links = {}
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, " أهلاً بك مع سِنآل ^_^ ! 👋\nأرسل لي رابط الفيديو (تيك توك، يوتيوب، إنستغرام، X) وسأقوم بتحميله لك بدون علامة مائية.")
+    bot.reply_to(message, "أهلاً بك معك سِنآل! 👋\nأرسل لي رابط الفيديو (تيك توك، يوتيوب، إنستغرام، X) وسأقوم بتحميله لك بدون علامة مائية.")
 
 @bot.message_handler(func=lambda message: message.text and message.text.startswith("http"))
 def handle_url(message):
@@ -81,5 +98,8 @@ def callback_query(call):
             if f.startswith(file_prefix):
                 os.remove(f)
 
-print("البوت يعمل الآن...")
-bot.infinity_polling()
+# --- تشغيل السيرفر الوهمي والبوت معاً ---
+if __name__ == "__main__":
+    keep_alive()
+    print("البوت يعمل الآن...")
+    bot.infinity_polling()
