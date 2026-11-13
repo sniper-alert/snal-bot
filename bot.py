@@ -1,6 +1,6 @@
 import os
 
-# تحديث أداة التحميل لأحدث إصدار تلقائياً
+# تحديث أداة التحميل لأحدث إصدار
 os.system('pip install --upgrade yt-dlp')
 
 from flask import Flask
@@ -9,7 +9,6 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp
 
-# --- بداية السيرفر الوهمي (لحل مشكلة Render) ---
 app = Flask('')
 
 @app.route('/')
@@ -22,9 +21,7 @@ def run():
 def keep_alive():
     t = threading.Thread(target=run)
     t.start()
-# ---------------------------------------------
 
-# ضع توكن بوتك الصحيح هنا حصراً
 BOT_TOKEN = "9239041330:AAEk8woAvKhdslKCpPZUs9V4n2vs8Br3jB4"
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -42,7 +39,7 @@ def handle_url(message):
     markup = InlineKeyboardMarkup()
     markup.row_width = 2
     markup.add(
-        InlineKeyboardButton("🎬 فيديو بجودة عالية", callback_data="vid_best"),
+        InlineKeyboardButton("🎬 فيديو (مناسب للتلغرام)", callback_data="vid_best"),
         InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data="audio")
     )
     
@@ -64,12 +61,11 @@ def callback_query(call):
         'outtmpl': f'{file_prefix}.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        'socket_timeout': 30,
+        # تحديد صيغة تضمن حجماً معقولاً لا يتجاوز حدود تيليجرام
+        'format': 'best[filesize<45M]/bestvideo[filesize<40M]+bestaudio/best',
     }
 
-    if call.data == "vid_best":
-        ydl_opts['format'] = 'best/bestvideo+bestaudio'
-    elif call.data == "audio":
+    if call.data == "audio":
         ydl_opts['format'] = 'bestaudio/best'
         ydl_opts['postprocessors'] = [{
             'key': 'FFmpegExtractAudio',
@@ -83,6 +79,13 @@ def callback_query(call):
             filename = ydl.prepare_filename(info)
             if call.data == "audio":
                 filename = os.path.splitext(filename)[0] + ".mp3"
+
+        # التحقق من حجم الملف النهائي احتياطياً قبل الإرسال
+        file_size_mb = os.path.getsize(filename) / (1024 * 1024)
+        if file_size_mb > 50:
+            bot.edit_message_text("❌ حجم الفيديو كبير جداً ولا يتوافق مع حدود تيليجرام (أكبر من 50 ميجابايت).", chat_id, call.message.message_id)
+            os.remove(filename)
+            return
 
         bot.edit_message_text("📤 جاري إرسال الملف إليك...", chat_id, call.message.message_id)
 
@@ -104,7 +107,6 @@ def callback_query(call):
                 except:
                     pass
 
-# --- تشغيل السيرفر الوهمي والبوت معاً ---
 if __name__ == "__main__":
     keep_alive()
     print("البوت يعمل الآن...")
