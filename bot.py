@@ -39,7 +39,7 @@ def handle_url(message):
     markup = InlineKeyboardMarkup()
     markup.row_width = 2
     markup.add(
-        InlineKeyboardButton("🎬 فيديو (مناسب للتلغرام)", callback_data="vid_best"),
+        InlineKeyboardButton("🎬 تحميل الفيديو", callback_data="vid_best"),
         InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data="audio")
     )
     
@@ -61,8 +61,7 @@ def callback_query(call):
         'outtmpl': f'{file_prefix}.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        # تحديد صيغة تضمن حجماً معقولاً لا يتجاوز حدود تيليجرام
-        'format': 'best[filesize<45M]/bestvideo[filesize<40M]+bestaudio/best',
+        'format': 'best[ext=mp4]/best',
     }
 
     if call.data == "audio":
@@ -80,10 +79,13 @@ def callback_query(call):
             if call.data == "audio":
                 filename = os.path.splitext(filename)[0] + ".mp3"
 
-        # التحقق من حجم الملف النهائي احتياطياً قبل الإرسال
+        # التحقق من أن الملف موجود وصغير الحجم قبل الإرسال
+        if not os.path.exists(filename):
+            raise Exception("فشل حفظ الملف على الخادم.")
+
         file_size_mb = os.path.getsize(filename) / (1024 * 1024)
         if file_size_mb > 50:
-            bot.edit_message_text("❌ حجم الفيديو كبير جداً ولا يتوافق مع حدود تيليجرام (أكبر من 50 ميجابايت).", chat_id, call.message.message_id)
+            bot.edit_message_text(f"❌ حجم الفيديو ({file_size_mb:.1f}MB) أكبر من الحد المسموح به في تيليجرام (50MB).", chat_id, call.message.message_id)
             os.remove(filename)
             return
 
