@@ -1,6 +1,6 @@
 import os
 
-# تحديث أداة التحميل لأحدث إصدار
+# تحديث أداة التحميل لأحدث إصدار تلقائياً
 os.system('pip install --upgrade yt-dlp')
 
 from flask import Flask
@@ -9,6 +9,7 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp
 
+# --- بداية السيرفر الوهمي (لحل مشكلة Render) ---
 app = Flask('')
 
 @app.route('/')
@@ -21,6 +22,7 @@ def run():
 def keep_alive():
     t = threading.Thread(target=run)
     t.start()
+# ---------------------------------------------
 
 BOT_TOKEN = "9239041330:AAEk8woAvKhdslKCpPZUs9V4n2vs8Br3jB4"
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -39,7 +41,7 @@ def handle_url(message):
     markup = InlineKeyboardMarkup()
     markup.row_width = 2
     markup.add(
-        InlineKeyboardButton("🎬 تحميل الفيديو", callback_data="vid_best"),
+        InlineKeyboardButton("🎬 تحميل الفيديو (مناسب لتيليجرام)", callback_data="vid_best"),
         InlineKeyboardButton("🎵 صوت فقط (MP3)", callback_data="audio")
     )
     
@@ -54,14 +56,15 @@ def callback_query(call):
         bot.answer_callback_query(call.id, "انتهت صلاحية الرابط، أرسله مجدداً.")
         return
 
-    bot.edit_message_text("⏳ جاري التحميل والمعالجة... يرجى الانتظار.", chat_id, call.message.message_id)
+    bot.edit_message_text("⏳ جاري التحميل والمعالجة... يرجى الانتظار .. سِنآل يرحب بك.", chat_id, call.message.message_id)
     
     file_prefix = f"download_{chat_id}"
     ydl_opts = {
         'outtmpl': f'{file_prefix}.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        'format': 'best[ext=mp4]/best',
+        # تقييد الدقة والحجم لضمان عدم تجاوز حدود تيليجرام (أقل من 45MB)
+        'format': 'best[height<=720][filesize<45M]/best[height<=480]/best[ext=mp4]/best',
     }
 
     if call.data == "audio":
@@ -79,7 +82,6 @@ def callback_query(call):
             if call.data == "audio":
                 filename = os.path.splitext(filename)[0] + ".mp3"
 
-        # التحقق من أن الملف موجود وصغير الحجم قبل الإرسال
         if not os.path.exists(filename):
             raise Exception("فشل حفظ الملف على الخادم.")
 
@@ -109,6 +111,7 @@ def callback_query(call):
                 except:
                     pass
 
+# --- تشغيل السيرفر الوهمي والبوت معاً ---
 if __name__ == "__main__":
     keep_alive()
     print("البوت يعمل الآن...")
