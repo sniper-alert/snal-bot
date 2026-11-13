@@ -1,6 +1,6 @@
 import os
 
-# تحديث أداة التحميل لأحدث إصدار تلقائياً
+# تحديث أداة التحميل لأحدث إصدار تلقائياً لتجاوز حماية المنصات
 os.system('pip install --upgrade yt-dlp')
 
 from flask import Flask
@@ -31,7 +31,7 @@ user_links = {}
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "أهلاً بك معك سِنآل! 👋\nأرسل لي رابط الفيديو (تيك توك، يوتيوب، إنستغرام، X) وسأقوم بتحميله لك.")
+    bot.reply_to(message, "أهلاً بك معك سِنآل! 👋\nأرسل لي أي رابط (تيك توك، يوتيوب، إنستغرام، X) وسأقوم بتحميله ومعالجته لك.")
 
 @bot.message_handler(func=lambda message: message.text and message.text.startswith("http"))
 def handle_url(message):
@@ -56,16 +56,21 @@ def callback_query(call):
         bot.answer_callback_query(call.id, "انتهت صلاحية الرابط، أرسله مجدداً.")
         return
 
-    bot.edit_message_text("⏳ جاري التحميل والمعالجة... يرجى الانتظار.", chat_id, call.message.message_id)
+    bot.edit_message_text("⏳ جاري التحميل والمعالجة وتجاوز الحماية... يرجى الانتظار.", chat_id, call.message.message_id)
     
     file_prefix = f"download_{chat_id}"
     
-    # التعديل هنا لاختيار أصغر وأفضل صيغة متوافقة تماماً مع تيليجرام
+    # إعدادات متقدمة لتجاوز الحماية وجلب أفضل صيغة MP4 متوافقة
     ydl_opts = {
         'outtmpl': f'{file_prefix}.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        'format': 'worst[ext=mp4]/best[ext=mp4]/best',
+        'format': 'best[ext=mp4]/best',
+        'nocheckcertificate': True,
+        'geo_bypass': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
     }
 
     if call.data == "audio":
@@ -87,8 +92,21 @@ def callback_query(call):
             raise Exception("فشل حفظ الملف على الخادم.")
 
         file_size_mb = os.path.getsize(filename) / (1024 * 1024)
+        
+        # إذا كان الفيديو أكبر من 50MB، نقوم بضغط باستخدام ffmpeg تلقائياً ليتوافق مع تيليجرام
+        if file_size_mb > 50 and call.data != "audio":
+            bot.edit_message_text("🔄 حجم الفيديو كبير، جاري ضغطه وتقليص مساحته ليناسب تيليجرام...", chat_id, call.message.message_id)
+            compressed_filename = f"compressed_{file_prefix}.mp4"
+            # استخدام ffmpeg لتقليل معدل البت وضغط الفيديو
+            os.system(f"ffmpeg -i '{filename}' -vcodec libx264 -crf 28 -preset fast '{compressed_filename}' -y")
+            
+            if os.path.exists(compressed_filename):
+                os.remove(filename)
+                filename = compressed_filename
+                file_size_mb = os.path.getsize(filename) / (1024 * 1024)
+
         if file_size_mb > 50:
-            bot.edit_message_text(f"❌ عذراً، حجم الفيديو ({file_size_mb:.1f}MB) كبير جداً ويتجاوز حد تيليجرام.", chat_id, call.message.message_id)
+            bot.edit_message_text(f"❌ عذراً، حجم الفيديو ({file_size_mb:.1f}MB) كبير جداً ولم نتمكن من ضغطه بما يكفي.", chat_id, call.message.message_id)
             os.remove(filename)
             return
 
@@ -104,9 +122,9 @@ def callback_query(call):
         bot.delete_message(chat_id, call.message.message_id)
 
     except Exception as e:
-        bot.edit_message_text(f"❌ حدث خطأ أثناء التحميل.\nالتفاصيل: {str(e)[:100]}", chat_id, call.message.message_id)
+        bot.edit_message_text(f"❌ حدث خطأ أثناء التحميل أو التجاوز.\nالتفاصيل: {str(e)[:100]}", chat_id, call.message.message_id)
         for f in os.listdir():
-            if f.startswith(file_prefix):
+            if f.startswith(file_prefix) or f.startswith(f"compressed_{file_prefix}"):
                 try:
                     os.remove(f)
                 except:
