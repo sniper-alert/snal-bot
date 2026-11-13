@@ -641,6 +641,7 @@ def download_and_send(key, quality):
                 sessions[key]["large_confirmed"] = False
 
 
+
 # ==============================
 # Startup
 # ==============================
@@ -651,10 +652,14 @@ if __name__ == "__main__":
         daemon=True
     ).start()
 
-    logger.info("Sinal is running")
+    logger.info("Sinal is starting Telegram polling")
 
-    bot.infinity_polling(
-        skip_pending=True,
-        timeout=30,
-        long_polling_timeout=30
-    )
+    try:
+        bot.infinity_polling(
+            skip_pending=True,
+            timeout=30,
+            long_polling_timeout=30
+        )
+    except Exception:
+        logger.exception("Telegram polling stopped unexpectedly")
+        raise
