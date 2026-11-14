@@ -1,185 +1,122 @@
-import asyncio
-import logging
+import os
+import threading
+from flask import Flask
+import telebot
+import yt_dlp
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode, ChatAction
-from aiogram.filters import Command
-from aiogram.types import (
-    Message, CallbackQuery,
-    FSInputFile,
-)
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+# جلب توكن البوت من متغيرات البيئة بأمان
+TOKEN = os.environ.get("BOT_TOKEN")
+if not TOKEN:
+  raise ValueError("BOT_TOKEN is missing in environment variables!")
 
-from config import BOT_TOKEN
-from downloader import (
-    download, cleanup, extract_url, is_supported,
-    fmt_duration, fmt_size, DownloadError, MAX_HEIGHT,
-)
+bot = telebot.TeleBot(TOKEN)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
-)
-log = logging.getLogger('bot')
-
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
-
-pending = {}
+# إعداد سيرفر Flask مصغر للحفاظ على نشاط البوت على Render (منع النوم)
+app = Flask("")
 
 
-WELCOME = (
-    '<b>Video Downloader</b>\n\n'
-    'Send me a link — I will download the video and send it back.\n\n'
-    'Supported:\n'
-    '• YouTube\n'
-    '• TikTok\n'
-    '• Instagram\n'
-    '• Twitter / X\n\n'
-    'Max quality: 720p\n'
-    'Max file size: 49 MB\n\n'
-    'Commands:\n'
-    '/start — this message\n'
-    '/help — same as /start\n'
-    '/cancel — clear pending link'
-)
+@app.route("/")
+def home():
+  return "Snal Bot is running 24/7!"
 
 
-def quality_kb():
-    b = InlineKeyboardBuilder()
-    b.button(text='360p', callback_data='q:360')
-    b.button(text='480p', callback_data='q:480')
-    b.button(text='720p', callback_data='q:720')
-    b.button(text='Cancel', callback_data='q:cancel')
-    b.adjust(3, 1)
-    return b.as_markup()
+def run_flask():
+  app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
 
-@dp.message(Command('start'))
-@dp.message(Command('help'))
-async def cmd_start(message: Message):
-    await message.answer(WELCOME)
+# رسالة البدء
+@bot.message_handler(commands=["start", "help"])
+def send_welcome(message):
+  bot.reply_to(
+      message,
+      "أهلاً بك يا سِنآل! 🤖\n\nأرسل لي أي رابط من (TikTok, YouTube, Instagram, X/Twitter)"
+      " وسأقوم بتحميله وإرساله لك فوراً بجودة عالية.",
+  )
 
 
-@dp.message(Command('cancel'))
-async def cmd_cancel(message: Message):
-    pending.pop(message.from_user.id, None)
-    await message.answer('Pending link cleared.')
+# استقبال الروابط ومعالجتها
+@bot.message_handler(func=lambda message: True)
+def handle_link(message):
+  url = message.text.strip()
+
+  # التحقق البسيط من أن الرسالة رابط
+  if not url.startswith("http"):
+    bot.reply_to(message, "الرجاء إرسال رابط صحيح يبدأ بـ http أو https.")
+    return
+
+  msg = bot.reply_to(message, "⏳ جاري تحليل الرابط والتحميل، انتظر قليلاً...")
+
+  # تشغيل التحميل في خيط منفصل (Background Thread) لعدم تجميد البوت
+  threading.Thread(target=download_and_send, args=(message.chat.id, url, msg.message_id)).start()
 
 
-@dp.message(F.text)
-async def on_text(message: Message):
-    url = extract_url(message.text)
+def download_and_send(chat_id, url, processing_msg_id):
+  output_template = f"downloads/file_{chat_id}_%(id)s.%(ext)s"
+  os.makedirs("downloads", exist_ok=True)
 
-    if not url:
-        await message.answer('Send me a video link or /help.')
-        return
+  # إعدادات yt-dlp الذكية والمستقرة لتجنب المشاكل قدر الإمكان
+  ydl_opts = {
+      "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+      "outtmpl": output_template,
+      "max_filesize": 50 * 1024 * 1024,  # تحديد الحد الأقصى 50 ميجابايت لتوافق تيليجرام
+      "nocheckcertificate": True,
+      "ignoreerrors": False,
+      "quiet": True,
+  }
 
-    if not is_supported(url):
-        await message.answer(
-            'This site is not in the supported list.\n'
-            'Send /help to see what works.'
-        )
-        return
+  downloaded_file = None
+  try:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+      # استخراج معلومات الفيديو أولاً للتحقق
+      info = ydl.extract_info(url, download=True)
+      downloaded_file = ydl.prepare_filename(info)
 
-    pending[message.from_user.id] = url
-    await message.answer(
-        f'Link received.\nChoose quality (max {MAX_HEIGHT}p):',
-        reply_markup=quality_kb(),
-    )
+    # التأكد من وجود الملف وجاهزيته للإرسال
+    if downloaded_file and os.path.exists(downloaded_file):
+      bot.edit_message_text(
+          "📤 جاري رفع الملف إليك...", chat_id=chat_id, message_id=processing_msg_id
+      )
 
+      with open(downloaded_file, "rb") as f:
+        # فحص إذا كان الملف صوتاً أو فيديو للإرسال بالطريقة المناسبة
+        if downloaded_file.endswith((".mp3", ".m4a", ".wav")):
+          bot.send_audio(chat_id, f)
+        else:
+          bot.send_video(chat_id, f, supports_streaming=True)
 
-@dp.callback_query(F.data.startswith('q:'))
-async def on_quality(cb: CallbackQuery):
-    user_id = cb.from_user.id
-    choice = cb.data.split(':', 1)[1]
+      # حذف رسالة "جاري التحميل" لتنظيف المحادثة
+      bot.delete_message(chat_id, processing_msg_id)
+    else:
+      bot.edit_message_text(
+          "❌ عذراً، لم أتمكن من العثور على ملف قابل للتحميل من هذا الرابط.",
+          chat_id=chat_id,
+          message_id=processing_msg_id,
+      )
 
-    if choice == 'cancel':
-        pending.pop(user_id, None)
-        await cb.message.edit_text('Cancelled.')
-        await cb.answer()
-        return
-
-    url = pending.pop(user_id, None)
-    if not url:
-        await cb.message.edit_text('Link expired. Send it again.')
-        await cb.answer()
-        return
-
+  except Exception as e:
+    print(f"Error details: {e}")
+    error_msg = "❌ حدث خطأ أثناء التحميل. قد يكون الرابط محظوراً، أو الفيديو كبيراً جداً، أو المنصة غير متاح فيها التحميل مؤقتاً."
     try:
-        height = int(choice)
-    except ValueError:
-        height = 720
+      bot.edit_message_text(
+          error_msg, chat_id=chat_id, message_id=processing_msg_id
+      )
+    except:
+      bot.send_message(chat_id, error_msg)
 
-    await cb.answer(f'Downloading {height}p...')
-    try:
-        await cb.message.edit_text(f'⏳ Downloading ({height}p)...')
-    except Exception:
-        pass
-    await _run_download(cb.message, url, user_id, height)
-
-
-async def _run_download(message: Message, url: str, user_id: int, height: int):
-    chat_id = message.chat.id
-
-    try:
-        await bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
-    except Exception:
-        pass
-
-    try:
-        result = await download(url, user_id, message.message_id, max_height=height)
-    except DownloadError as e:
-        log.error('download error: %s', e)
-        try:
-            await bot.send_message(chat_id, f'❌ {e}')
-        except Exception:
-            log.exception('failed to send error')
-        return
-    except Exception as e:
-        log.exception('download crashed')
-        try:
-            await bot.send_message(chat_id, f'❌ unexpected: {str(e)[:300]}')
-        except Exception:
-            log.exception('failed to send error')
-        return
-
-    path = result['path']
-    caption = (
-        f"<b>{result['title'][:180]}</b>\n"
-        f"Duration: {fmt_duration(result['duration'])}\n"
-        f"Size: {fmt_size(result['size'])}"
-    )
-
-    try:
-        await bot.send_chat_action(chat_id, ChatAction.UPLOAD_VIDEO)
-        video = FSInputFile(path)
-        await bot.send_video(
-            chat_id=chat_id,
-            video=video,
-            caption=caption,
-            supports_streaming=True,
-            request_timeout=120,
-        )
-    except Exception as e:
-        log.exception('upload failed')
-        try:
-            await bot.send_message(chat_id, f'❌ upload failed: {str(e)[:300]}')
-        except Exception:
-            log.exception('failed to send upload error')
-    finally:
-        cleanup(path)
+  finally:
+    # تنظيف وحذف الملف من مساحة التخزين المؤقتة حتماً لمنع امتلاء السيرفر
+    if downloaded_file and os.path.exists(downloaded_file):
+      try:
+        os.remove(downloaded_file)
+      except Exception as e:
+        print(f"Error removing file: {e}")
 
 
-async def main():
-    log.info('bot starting')
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+# تشغيل سيرفر الـ Flask والبوت معاً
+if __name__ == "__main__":
+  flask_thread = threading.Thread(target=run_flask)
+  flask_thread.daemon = True
+  flask_thread.start()
 
-
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        log.info('bot stopped')
+  print("Bot is starting...")
+  bot.infinity_polling()
