@@ -65,7 +65,7 @@ def download_and_send(chat_id, url, processing_msg_id):
   os.makedirs("downloads", exist_ok=True)
   downloaded_file = None
 
-  # إعدادات yt-dlp المحدثة خصيصاً لمحاكاة متصفح هاتف ذكي لتجاوز حظر تيك توك
+  # إعدادات متقدمة باستخدام محاكاة المتصفح (Impersonation) لتجاوز حظر تيك توك كلياً
   ydl_opts = {
       "format": "best",
       "outtmpl": output_template,
@@ -74,22 +74,7 @@ def download_and_send(chat_id, url, processing_msg_id):
       "ignoreerrors": False,
       "quiet": True,
       "geo_bypass": True,
-      "extractor_args": {
-          "tiktok": {
-              "app_name": ["musically"],  # محاكاة تطبيق تيك توك الرسمي
-              "api_hostname": ["api16-normal-c-useast1a.tiktokv.com"],
-          }
-      },
-      "http_headers": {
-          "User-Agent": (
-              "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) "
-              "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 "
-              "Mobile/15E148 Safari/604.1"
-          ),
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5",
-          "Sec-Fetch-Mode": "navigate",
-      },
+      "impersonate": "chrome",  # تفعيل محاكاة متصفح كروم عبر مكتبة curl_cffi
   }
 
   try:
@@ -120,7 +105,7 @@ def download_and_send(chat_id, url, processing_msg_id):
 
   except Exception as e:
     print(f"Error details: {e}")
-    error_msg = f"❌ تعذر تحميل تيك توك: {str(e)[:80]}"
+    error_msg = f"❌ تعذر التحميل: {str(e)[:80]}"
     try:
       bot.edit_message_text(
           error_msg, chat_id=chat_id, message_id=processing_msg_id
